@@ -59,7 +59,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let csv_file = DataExporter::save_csv(&metrics)?;
     DataExporter::generate_python_script(&csv_file)?;
 
-    println!("\n✓ guztia prest");
+    println!("\nguztia prest");
     println!("python script-a exekutatu grafikak ikusteko: python3 analyze_tracking.py");
 
     Ok(())
