@@ -1,0 +1,281 @@
+# lighthouse_timing.s - lighthouse v1 timing kritikoa
+# x86-64 at&t sintaxia, euskaraz
+# 
+# lighthouse v1 protokoloa (benetakoa):
+# - sync pulse: 59-139 micros (base station id + axis info)
+# - sweep pulse: sync-tik 1222-6777 micros geroago
+# - zikloa: 8.333ms (120hz)
+# - laser abiadura: 180° zikloko (pi rad / 8333 micros)
+
+.section .data
+    # timing konstanteak mikrosegundotan (benetako lighthouse v1 spec-ak)
+    .align 8
+    sync_min:           .quad   59          # sync pulse gutxienekoa
+    sync_max:           .quad   139         # sync pulse gehienekoa
+    sweep_min:          .quad   1222        # sweep denbora gutxienekoa
+    sweep_max:          .quad   6777        # sweep denbora gehienekoa
+    cycle_period:       .quad   8333        # ziklo osoa
+    center_offset:      .quad   4000        # erdiko offset-a (0° angelurako)
+    
+    # base station id taulak (sync pulse luzeratik)
+    # 4 bit kodifikazioa: [skip][data][axis][station]
+    # station: 0=A, 1=B
+    # axis: 0=horizontal, 1=vertical
+    # data: ootx datu bit-a
+    # skip: sweep saltatu behar bada
+    pulse_decode_table:
+        .byte   0b0000          # 59-72 micros:  station A, horizontal, data 0
+        .byte   0b0001          # 73-86 micros:  station A, horizontal, data 1
+        .byte   0b0010          # 87-100 micros: station A, vertical, data 0
+        .byte   0b0011          # 101-114 micros: station A, vertical, data 1
+        .byte   0b0100          # 115-128 micros: station B, horizontal, data 0
+        .byte   0b0101          # 129-139 micros: station B, horizontal, data 1
+        .byte   0b1000          # skip (ez dago sweep)
+        .byte   0b1001          # skip (ez dago sweep)
+    
+    # sensor timestamp buffer (64 laginen buffer zirkularra)
+    .align 64
+    sensor_timestamps:  .space  512         # 64 x 8 byte timestamps
+    sensor_durations:   .space  512         # 64 x 8 byte iraupenak
+    buffer_head:        .quad   0           # buffer burua (idazketa)
+    buffer_tail:        .quad   0           # buffer buztana (irakurketa)
+    buffer_count:       .quad   0           # elementu kopurua
+    
+    # azken sync pulse denbora eta mota
+    last_sync_time:     .quad   0
+    last_sync_type:     .quad   0           # dekodetutako mota
+    
+    # angeluak (radianak, float)
+    .align 16
+    current_angles:     .space  16          # [angle_h, angle_v, 0, 0]
+    
+    # konstanteak float kalkularako
+    .section .rodata
+    .align 16
+    pi_constant:        .float  3.14159265359
+    cycle_period_f:     .float  8333.0
+    center_offset_f:    .float  4000.0
+    angle_scale:        .float  0.0003768   # pi / 8333
+
+.section .text
+.globl lighthouse_process_pulse
+.globl lighthouse_decode_angles
+.globl lighthouse_reset_state
+
+# ---------------------------------------------------------------
+# lighthouse_process_pulse: fotodiodo pulse bat prozesatu
+# 
+# sarrera:
+#   %rdi = pulse_start_us (pulse hasierako timestamp micros-tan)
+#   %rsi = pulse_duration_us (pulse iraupena micros-tan)
+#   %rdx = sensor_id (zein sentsore, 0-31)
+# 
+# irteera:
+#   %rax = pulse mota:
+#          0 = ezezaguna
+#          1 = sync pulse (base station sync)
+#          2 = sweep pulse (laser plane sweep)
+# 
+# deskribapena:
+#   pulse timing-a analizatzen du eta mota zehazten du.
+#   sync pulse-ak 59-139 micros artean.
+#   sweep pulse-ak sync-tik 1222-6777 micros geroago.
+#   buffer zirkularrean gordetzen ditu datuak.
+# ---------------------------------------------------------------
+lighthouse_process_pulse:
+    pushq   %rbp
+    movq    %rsp, %rbp
+    pushq   %rbx
+    pushq   %r12
+    pushq   %r13
+    pushq   %r14
+    
+    # parametroak gorde
+    movq    %rdi, %r12              # pulse_start_us
+    movq    %rsi, %r13              # pulse_duration_us
+    movq    %rdx, %r14              # sensor_id
+    
+    # lehenik, sync pulse den begiratu (59-139 micros)
+    movq    sync_min(%rip), %rax
+    cmpq    %rax, %r13
+    jl      .check_sweep            # txikiegia sync-erako
+    
+    movq    sync_max(%rip), %rax
+    cmpq    %rax, %r13
+    jg      .check_sweep            # handiegia sync-erako
+    
+    # sync pulse da!
+    jmp     .handle_sync
+
+.check_sweep:
+    # sweep pulse den begiratu
+    # sweep-ak sync pulse-tik 1222-6777 micros geroago daude
+    
+    # azken sync denbora kargatu
+    movq    last_sync_time(%rip), %rbx
+    testq   %rbx, %rbx
+    jz      .unknown_pulse          # ez dago sync oraindik
+    
+    # delta kalkulatu
+    movq    %r12, %rax
+    subq    %rbx, %rax              # delta = current - last_sync
+    
+    # sweep tartean dagoen begiratu
+    movq    sweep_min(%rip), %rcx
+    cmpq    %rcx, %rax
+    jl      .unknown_pulse
+    
+    movq    sweep_max(%rip), %rcx
+    cmpq    %rcx, %rax
+    jg      .unknown_pulse
+    
+    # sweep pulse da! angelua kalkulatu
+    jmp     .handle_sweep
+
+.handle_sync:
+    # sync pulse dekodetu
+    # pulse luzerarekin base station eta axis-a zehaztu
+    
+    # pulse iraupena normalizatu (59-tik kendu, 13 micros-ko tarteak)
+    movq    %r13, %rax
+    subq    sync_min(%rip), %rax
+    
+    # 13-z zatitu table index lortzeko
+    movq    $13, %rcx
+    xorq    %rdx, %rdx
+    divq    %rcx                    # rax = index, rdx = hondarra
+    
+    # taula limiteetara mugatu (0-7)
+    cmpq    $7, %rax
+    jle     .sync_index_ok
+    movq    $7, %rax
+.sync_index_ok:
+    
+    # decode table-tik irakurri
+    leaq    pulse_decode_table(%rip), %rbx
+    movzbq  (%rbx,%rax,1), %rcx     # mota kargatu
+    
+    # gorde azken sync info
+    movq    %r12, last_sync_time(%rip)
+    movq    %rcx, last_sync_type(%rip)
+    
+    # skip flag begiratu (bit 3)
+    testb   $0b1000, %cl
+    jnz     .return_unknown         # skip da, ezezaguna itzuli
+    
+    movq    $1, %rax                # return 1 (sync)
+    jmp     .store_and_return
+
+.handle_sweep:
+    # sweep pulse angelua kalkulatu
+    # angle = (delta_us - center_offset) * pi / cycle_period
+    
+    # delta berriro kalkulatu (dagoeneko %rax-en dago)
+    movq    %r12, %rax
+    subq    last_sync_time(%rip), %rax
+    
+    # float-era bihurtu eta angelua kalkulatu
+    cvtsi2ssq %rax, %xmm0           # delta -> float
+    
+    subss   center_offset_f(%rip), %xmm0    # - 4000
+    mulss   angle_scale(%rip), %xmm0        # * (pi / 8333)
+    
+    # angelua gorde (axis sync type-tik lortu)
+    movq    last_sync_type(%rip), %rcx
+    testb   $0b0010, %cl            # axis bit (bit 1)
+    jz      .store_horizontal
+    
+.store_vertical:
+    # vertical angelua (y inguruan biraketa)
+    leaq    current_angles(%rip), %rbx
+    movss   %xmm0, 4(%rbx)          # angle_v
+    jmp     .sweep_stored
+
+.store_horizontal:
+    # horizontal angelua (x inguruan biraketa)
+    leaq    current_angles(%rip), %rbx
+    movss   %xmm0, 0(%rbx)          # angle_h
+
+.sweep_stored:
+    movq    $2, %rax                # return 2 (sweep)
+    jmp     .store_and_return
+
+.unknown_pulse:
+.return_unknown:
+    xorq    %rax, %rax              # return 0 (ezezaguna)
+    jmp     .done
+
+.store_and_return:
+    # timestamp eta iraupena buffer zirkularrean gorde
+    movq    buffer_head(%rip), %rbx
+    
+    leaq    sensor_timestamps(%rip), %rcx
+    movq    %r12, (%rcx,%rbx,8)
+    
+    leaq    sensor_durations(%rip), %rcx
+    movq    %r13, (%rcx,%rbx,8)
+    
+    # buffer head inkrementatu (% 64)
+    incq    %rbx
+    andq    $63, %rbx
+    movq    %rbx, buffer_head(%rip)
+    
+    # count inkrementatu (64-ra arte)
+    movq    buffer_count(%rip), %rcx
+    cmpq    $64, %rcx
+    jge     .done
+    incq    %rcx
+    movq    %rcx, buffer_count(%rip)
+
+.done:
+    popq    %r14
+    popq    %r13
+    popq    %r12
+    popq    %rbx
+    popq    %rbp
+    ret
+
+# ---------------------------------------------------------------
+# lighthouse_decode_angles: uneko angeluak itzuli
+# 
+# sarrera: bat ere ez
+# irteera: %rax = current_angles buffer-en helbidea (2 float: [h, v])
+# 
+# oharrak:
+#   float array-aren helbidea itzultzen du:
+#   [0] = horizontal angelua (radianak, -pi/3 - pi/3)
+#   [4] = vertical angelua (radianak, -pi/3 - pi/3)
+# ---------------------------------------------------------------
+lighthouse_decode_angles:
+    pushq   %rbp
+    movq    %rsp, %rbp
+    
+    leaq    current_angles(%rip), %rax
+    
+    popq    %rbp
+    ret
+
+# ---------------------------------------------------------------
+# lighthouse_reset_state: buffer eta egoera garbitu
+# ---------------------------------------------------------------
+lighthouse_reset_state:
+    pushq   %rbp
+    movq    %rsp, %rbp
+    
+    # buffer indices reset
+    movq    $0, buffer_head(%rip)
+    movq    $0, buffer_tail(%rip)
+    movq    $0, buffer_count(%rip)
+    
+    # sync state reset
+    movq    $0, last_sync_time(%rip)
+    movq    $0, last_sync_type(%rip)
+    
+    # angeluak zero
+    leaq    current_angles(%rip), %rax
+    xorps   %xmm0, %xmm0
+    movss   %xmm0, 0(%rax)
+    movss   %xmm0, 4(%rax)
+    
+    popq    %rbp
+    ret
