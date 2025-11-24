@@ -2,7 +2,6 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 // TODO: GET BSD AND LINUX KERNEL APIs WORKING !
 
-
 #[cfg(target_os = "linux")]
 use std::os::unix::io::AsRawFd;
 
