@@ -1,6 +1,3 @@
-## sorry not all comments in English, I will translate all comments as a TODO item
-
-## DO NOT RUN UNDER WSL !!! WSL DOES NOT SEE USB DEVICES!
 
 ## HOW TO RUN:
 
@@ -20,5 +17,9 @@ your VR session should initialize and print logs like:
 
 the program will run a simple frame loop, 
 you can extend it with rendering, input logging, or other VR experiments.
+
+## sorry not all comments in English, I will translate all comments as a TODO item
+
+## DO NOT RUN UNDER WSL !!! WSL DOES NOT SEE USB DEVICES!
 
 #### work in progress, I am working on a driver so it integrates nicely with SteamVR on linux, especially Flatpak or another tricky port

@@ -1,0 +1,13 @@
+[Unit]
+description=librevr background service
+after=network.target
+
+[Service]
+type=simple
+user=librevr
+group=librevr
+execstart=/usr/bin/librevr --daemon
+restart=on-failure
+
+[Install]
+wantedby=multi-user.target

@@ -1,0 +1,13 @@
+Source: librevr
+Section: utils
+Priority: optional
+Maintainer: Ryan Harvey <ryan@ryan.eus>
+Build-Depends: debhelper (>= 11), cargo, rustc, libopenxr-dev, libvulkan-dev, pkg-config, libssl-dev, libudev-dev, ffmpeg
+Standards-Version: 4.5.0
+Homepage: https://git.ryan.eus/planetryan/libreVR
+
+Package: librevr
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, libopenxr1 (>= 1.0), libvulkan1, ffmpeg
+Description: librevr research driver and tracker for vive pro 2
+ openxr-based driver and data collection tool for PC VR headsets.

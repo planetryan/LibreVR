@@ -1,0 +1,4 @@
+# udev rule to allow non-root access to vive pro 2 usb device
+# replace idVendor and idProduct with your device ids
+
+SUBSYSTEM=="usb", ATTRS{idVendor}=="0bb4", ATTRS{idProduct}=="0000", MODE="0664", GROUP="plugdev", TAG+="uaccess"
