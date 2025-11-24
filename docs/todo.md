@@ -1,5 +1,6 @@
 # todo:
 ## short term/now
+* git mirrors
 * translate all comments since English is better understood/ is the de-facto standard for programmming
 * get video output on VR
 * 3dof
